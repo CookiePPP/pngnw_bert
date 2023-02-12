@@ -8,7 +8,7 @@ Also does (or will) include additional text-to-emoji objective using DeepMoji te
 
 ---
 
-![pre_training_architecture.png](L:\pngnw_bert\pngnwbert\pre_training_architecture.png)
+![pre_training_architecture.png](pngnwbert/pre_training_architecture.png)
 
 Here's the modified architecture.
 
