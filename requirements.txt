@@ -1,0 +1,3 @@
+git+https://github.com/ionite34/h2p-parser
+torch
+nltk
