@@ -1,5 +1,11 @@
 # pngnw_bert
 
+---
+
+## REPO STATUS: WORK IN PROGRESS
+
+---
+
 Unofficial PyTorch implementation of [PnG BERT](https://arxiv.org/pdf/2103.15060.pdf) with some changes.
 
 Dubbed "Phoneme and Grapheme and Word BERT", this model includes additional word-level embeddings on both grapheme and phoneme side of the model.
