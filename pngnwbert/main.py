@@ -71,7 +71,7 @@ def cli_main():
         dataloader_num_workers=args.dataloader_num_workers,
         dataset_kwargs=dict(
             path=args.dataset_path,
-            vocab=open(args.vocab_path, 'r', encoding='utf-8').read().splitlines(),
+            vocab=[v.strip() for v in open(args.vocab_path, 'r', encoding='utf-8').read().splitlines() if v.strip()],
             mlm_prob=args.mlm_prob,
             g2p_prob=args.g2p_prob,
             p2g_prob=args.p2g_prob,
@@ -93,12 +93,9 @@ def cli_main():
     # checkpoint
     # ------------
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        monitor='valid_loss',
         dirpath='checkpoints',
-        filename='lm-{epoch:02d}-{valid_loss:.2f}',
-        save_top_k=10,
-        mode='min',
-        every_n_train_steps=2000,
+        filename='lm-{epoch:02d}',
+        every_n_train_steps=100,
         save_last=True,
     )
     

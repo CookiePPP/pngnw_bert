@@ -70,8 +70,12 @@ class Dataset(torch.utils.data.Dataset):
         text_len = len(text)
         if text_len < 0.5 * raw_text_len:
             raise BadQualityDataError('Text contains >50% non-ASCII characters')
-        if text_len > 512:
-            raise BadQualityDataError(f'Text is too long ({text_len} > 512)')
+        if text_len > 280:
+            raise BadQualityDataError(f'Text is too long ({text_len} > 280)\nText: {text}')
+        
+        max_word_len = max([len(word) for word in text.split()])
+        if max_word_len > 63:
+            raise BadQualityDataError(f'Text contains a word that is too long ({max_word_len} > 64)')
         
         return self.tokenizer.convert_string_to_model_inputs(text, phones)
     
@@ -145,9 +149,11 @@ class Dataset(torch.utils.data.Dataset):
         with torch.no_grad():
             line = get_random_line(self.path)
             id, text, phones = line.split('\t')
+            
             text = unidecode(text).strip()
             text = CMUDictExt.preprocess_text(text)
             phones = CMUDictExt.convert(text)
+            
             seq_word_type, seq_word_ids, seq_char_ids, seq_segment_ids, seq_rel_word_pos, seq_rel_char_pos,\
               seq_abs_word_pos, seq_abs_char_pos, seq_subword_pos, seq_bad_arpa = self.process_seq(text, phones)
             
@@ -180,12 +186,13 @@ class Dataset(torch.utils.data.Dataset):
             )
     
     def __getitem__(self, index, ignore_exception=True):
-        for _ in range(10):
+        for _ in range(20):
             try:
                 return self.getitem(index)
             except BadQualityDataError:
                 if not ignore_exception:
                     raise
+                #traceback.print_exc()
                 continue
             except Exception as e:
                 if ignore_exception:
