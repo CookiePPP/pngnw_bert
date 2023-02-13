@@ -17,12 +17,6 @@
 from collections import OrderedDict
 from typing import Mapping
 
-from ...configuration_utils import PretrainedConfig
-from ...utils import logging
-
-
-logger = logging.get_logger(__name__)
-
 BERT_PRETRAINED_CONFIG_ARCHIVE_MAP = {
     "bert-base-uncased": "https://huggingface.co/bert-base-uncased/resolve/main/config.json",
     "bert-large-uncased": "https://huggingface.co/bert-large-uncased/resolve/main/config.json",
@@ -68,7 +62,7 @@ BERT_PRETRAINED_CONFIG_ARCHIVE_MAP = {
 }
 
 
-class BertConfig(PretrainedConfig):
+class BertConfig:
     r"""
     This is the configuration class to store the configuration of a [`BertModel`] or a [`TFBertModel`]. It is used to
     instantiate a BERT model according to the specified arguments, defining the model architecture. Instantiating a
@@ -139,7 +133,7 @@ class BertConfig(PretrainedConfig):
 
     def __init__(
         self,
-        vocab_size=30522,
+        vocab_size=33231,
         hidden_size=768,
         num_hidden_layers=12,
         num_attention_heads=12,
@@ -147,7 +141,7 @@ class BertConfig(PretrainedConfig):
         hidden_act="gelu",
         hidden_dropout_prob=0.1,
         attention_probs_dropout_prob=0.1,
-        max_position_embeddings=512,
+        max_position_embeddings=1024,
         type_vocab_size=2,
         initializer_range=0.02,
         layer_norm_eps=1e-12,
@@ -155,10 +149,15 @@ class BertConfig(PretrainedConfig):
         position_embedding_type="absolute",
         use_cache=True,
         classifier_dropout=None,
-        **kwargs,
+        chunk_size_feed_forward=0,
+        is_decoder=False,
+        add_cross_attention=False,
+        deepmoji_size=2304,
+        use_return_dict=True,
+        output_attentions=False,
+        output_hidden_states=False,
     ):
-        super().__init__(pad_token_id=pad_token_id, **kwargs)
-
+        super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
@@ -171,6 +170,14 @@ class BertConfig(PretrainedConfig):
         self.type_vocab_size = type_vocab_size
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
+        self.pad_token_id = pad_token_id
         self.position_embedding_type = position_embedding_type
         self.use_cache = use_cache
         self.classifier_dropout = classifier_dropout
+        self.chunk_size_feed_forward = chunk_size_feed_forward
+        self.is_decoder = is_decoder
+        self.add_cross_attention = add_cross_attention
+        self.deepmoji_size = deepmoji_size
+        self.use_return_dict = use_return_dict
+        self.output_attentions = output_attentions
+        self.output_hidden_states = output_hidden_states

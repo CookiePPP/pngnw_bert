@@ -79,18 +79,18 @@ class CMUDictExt:
 
         # Features
         # Auto pluralization and de-pluralization
-        self.ft_auto_plural = True
+        self.ft_auto_plural = False
         # Auto splits and infers possessive forms of original words
-        self.ft_auto_pos = True
+        self.ft_auto_pos = False
         # Auto splits 'll
-        self.ft_auto_ll = True
+        self.ft_auto_ll = False
         # Auto splits and infers hyphenated words
         self.ft_auto_hyphenated = True
         # Auto splits possible compound words
         self.ft_auto_compound = True
         # Analyzes word root stem and infers pronunciation separately
         # i.e. 'generously' -> 'generous' + 'ly'
-        self.ft_stem = True
+        self.ft_stem = False
         # Forces compound words using manual lookup
         self.ft_auto_compound_l2 = False
 
@@ -247,7 +247,15 @@ class CMUDictExt:
 
         # If not found
         return None
-
+    
+    def preprocess_text(self, text: str) -> str:
+        # Normalize numbers, if enabled
+        if self.process_numbers:
+            text = normalize_numbers(text)
+        # Filter and Tokenize
+        f_text = filter_text(text, preserve_case=True)
+        return f_text
+    
     def convert(self, text: str) -> str | None:
         # noinspection GrazieInspection
         """
@@ -261,12 +269,8 @@ class CMUDictExt:
         if self.unresolved_mode not in ['keep', 'remove', 'drop']:
             raise ValueError('Invalid value for unresolved_mode: {}'.format(self.unresolved_mode))
         ur_mode = self.unresolved_mode
-
-        # Normalize numbers, if enabled
-        if self.process_numbers:
-            text = normalize_numbers(text)
-        # Filter and Tokenize
-        f_text = filter_text(text, preserve_case=True)
+        
+        f_text = self.preprocess_text(text)
         words = self.h2p.tokenize(f_text)
         # Run POS tagging
         tags = self.h2p.get_tags(words)

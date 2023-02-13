@@ -6,8 +6,8 @@ import traceback
 
 import nltk
 import torch
-from pngnwbert.h2p_parser.cmudictext import CMUDictExt
 from pngnwbert.torchmoji.moji import TorchMoji
+from pngnwbert.h2p_parser.cmudictext import CMUDictExt
 CMUDictExt = CMUDictExt()
 try:
     from tqdm import tqdm
@@ -33,9 +33,9 @@ def split_text_into_sentence_chunks(text, min_size=20, max_size=120):
         # if sentence is longer than 120 chars, add it to it's own chunk.
         if len(chunks) == 0:
             chunks.append(sentence)
-        elif len(chunks[-1]) + len(sentence) < min_size:
+        elif len(chunks[-1]) + len(sentence) < min_size: # if current chunk is too small, add to it
             chunks[-1] += ' ' + sentence
-        elif len(chunks[-1])+len(sentence) > max_size:
+        elif len(chunks[-1])+len(sentence) > max_size: # if next chunk will be too big, start a new one
             chunks.append(sentence)
         else:
             chunks[-1] += ' ' + sentence
@@ -70,7 +70,7 @@ if __name__ == '__main__':
             torchmoji_inputs[id] = txt_chunk[:120*2]
             
             try:
-                txt_chunk_arpa = CMUDictExt.convert(txt_chunk)
+                txt_chunk_arpa = CMUDictExt.convert(txt_chunk.strip())
             except:
                 time.sleep(0.1)
                 print(f'Failed to convert "{txt_chunk}"')

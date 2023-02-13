@@ -14,11 +14,19 @@
 # limitations under the License.
 """Tokenization classes for Bert."""
 
+# Note - this is a modified version of the original code
 
 import collections
-import os
+import re
+
 import unicodedata
-from typing import List, Optional, Tuple
+from typing import List
+
+import torch
+import torch.nn.functional as F
+from unidecode import unidecode
+from pngnwbert.h2p_parser.text.numbers import normalize_numbers
+from pngnwbert.h2p_parser.filter import filter_text
 
 def _is_whitespace(char):
     """Checks whether `char` is a whitespace character."""
@@ -31,7 +39,6 @@ def _is_whitespace(char):
         return True
     return False
 
-
 def _is_control(char):
     """Checks whether `char` is a control character."""
     # These are technically control characters but we count them as whitespace
@@ -42,7 +49,6 @@ def _is_control(char):
     if cat.startswith("C"):
         return True
     return False
-
 
 def _is_punctuation(char):
     """Checks whether `char` is a punctuation character."""
@@ -103,49 +109,6 @@ PRETRAINED_VOCAB_FILES_MAP = {
     }
 }
 
-PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {
-    "bert-base-uncased": 512,
-    "bert-large-uncased": 512,
-    "bert-base-cased": 512,
-    "bert-large-cased": 512,
-    "bert-base-multilingual-uncased": 512,
-    "bert-base-multilingual-cased": 512,
-    "bert-base-chinese": 512,
-    "bert-base-german-cased": 512,
-    "bert-large-uncased-whole-word-masking": 512,
-    "bert-large-cased-whole-word-masking": 512,
-    "bert-large-uncased-whole-word-masking-finetuned-squad": 512,
-    "bert-large-cased-whole-word-masking-finetuned-squad": 512,
-    "bert-base-cased-finetuned-mrpc": 512,
-    "bert-base-german-dbmdz-cased": 512,
-    "bert-base-german-dbmdz-uncased": 512,
-    "TurkuNLP/bert-base-finnish-cased-v1": 512,
-    "TurkuNLP/bert-base-finnish-uncased-v1": 512,
-    "wietsedv/bert-base-dutch-cased": 512,
-}
-
-PRETRAINED_INIT_CONFIGURATION = {
-    "bert-base-uncased": {"do_lower_case": True},
-    "bert-large-uncased": {"do_lower_case": True},
-    "bert-base-cased": {"do_lower_case": False},
-    "bert-large-cased": {"do_lower_case": False},
-    "bert-base-multilingual-uncased": {"do_lower_case": True},
-    "bert-base-multilingual-cased": {"do_lower_case": False},
-    "bert-base-chinese": {"do_lower_case": False},
-    "bert-base-german-cased": {"do_lower_case": False},
-    "bert-large-uncased-whole-word-masking": {"do_lower_case": True},
-    "bert-large-cased-whole-word-masking": {"do_lower_case": False},
-    "bert-large-uncased-whole-word-masking-finetuned-squad": {"do_lower_case": True},
-    "bert-large-cased-whole-word-masking-finetuned-squad": {"do_lower_case": False},
-    "bert-base-cased-finetuned-mrpc": {"do_lower_case": False},
-    "bert-base-german-dbmdz-cased": {"do_lower_case": False},
-    "bert-base-german-dbmdz-uncased": {"do_lower_case": True},
-    "TurkuNLP/bert-base-finnish-cased-v1": {"do_lower_case": False},
-    "TurkuNLP/bert-base-finnish-uncased-v1": {"do_lower_case": True},
-    "wietsedv/bert-base-dutch-cased": {"do_lower_case": False},
-}
-
-
 def load_vocab(vocab_file):
     """Loads a vocabulary file into a dictionary."""
     vocab = collections.OrderedDict()
@@ -165,393 +128,49 @@ def whitespace_tokenize(text):
     tokens = text.split()
     return tokens
 
+def split_arpa(text):
+    # "{DH IH1 S} {W AA1 Z}, {N OW1 T AH0 B AH0 L}."
+    # to ["{DH IH1 S}", "{W AA1 Z},", "{N OW1 T AH0 B AH0 L}."]
+    split_text = []
+    is_in_bracket = 0
+    last_index = 0
+    for i, char in enumerate(text):
+        if char == "{":
+            is_in_bracket += 1
+        elif char == "}":
+            is_in_bracket -= 1
+        elif char == " " and not is_in_bracket:
+            split_text.append(text[last_index:i].replace('{', '').replace('}', '').strip())
+            last_index = i
+    split_text.append(text[last_index:].replace('{', '').replace('}', '').strip())
+    return split_text
+    
 
-class BertTokenizer(PreTrainedTokenizer):
-    r"""
-    Construct a BERT tokenizer. Based on WordPiece.
-
-    This tokenizer inherits from [`PreTrainedTokenizer`] which contains most of the main methods. Users should refer to
-    this superclass for more information regarding those methods.
-
-    Args:
-        vocab_file (`str`):
-            File containing the vocabulary.
-        do_lower_case (`bool`, *optional*, defaults to `True`):
-            Whether or not to lowercase the input when tokenizing.
-        do_basic_tokenize (`bool`, *optional*, defaults to `True`):
-            Whether or not to do basic tokenization before WordPiece.
-        never_split (`Iterable`, *optional*):
-            Collection of tokens which will never be split during tokenization. Only has an effect when
-            `do_basic_tokenize=True`
-        unk_token (`str`, *optional*, defaults to `"[UNK]"`):
-            The unknown token. A token that is not in the vocabulary cannot be converted to an ID and is set to be this
-            token instead.
-        sep_token (`str`, *optional*, defaults to `"[SEP]"`):
-            The separator token, which is used when building a sequence from multiple sequences, e.g. two sequences for
-            sequence classification or for a text and a question for question answering. It is also used as the last
-            token of a sequence built with special tokens.
-        pad_token (`str`, *optional*, defaults to `"[PAD]"`):
-            The token used for padding, for example when batching sequences of different lengths.
-        cls_token (`str`, *optional*, defaults to `"[CLS]"`):
-            The classifier token which is used when doing sequence classification (classification of the whole sequence
-            instead of per-token classification). It is the first token of the sequence when built with special tokens.
-        mask_token (`str`, *optional*, defaults to `"[MASK]"`):
-            The token used for masking values. This is the token used when training this model with masked language
-            modeling. This is the token which the model will try to predict.
-        tokenize_chinese_chars (`bool`, *optional*, defaults to `True`):
-            Whether or not to tokenize Chinese characters.
-
-            This should likely be deactivated for Japanese (see this
-            [issue](https://github.com/huggingface/transformers/issues/328)).
-        strip_accents (`bool`, *optional*):
-            Whether or not to strip all accents. If this option is not specified, then it will be determined by the
-            value for `lowercase` (as in the original BERT).
-    """
-
-    vocab_files_names = VOCAB_FILES_NAMES
-    pretrained_vocab_files_map = PRETRAINED_VOCAB_FILES_MAP
-    pretrained_init_configuration = PRETRAINED_INIT_CONFIGURATION
-    max_model_input_sizes = PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES
-
-    def __init__(
-        self,
-        vocab_file,
-        do_lower_case=True,
-        do_basic_tokenize=True,
-        never_split=None,
-        unk_token="[UNK]",
-        sep_token="[SEP]",
-        pad_token="[PAD]",
-        cls_token="[CLS]",
-        mask_token="[MASK]",
-        tokenize_chinese_chars=True,
-        strip_accents=None,
-        **kwargs,
-    ):
-        super().__init__(
-            do_lower_case=do_lower_case,
-            do_basic_tokenize=do_basic_tokenize,
-            never_split=never_split,
-            unk_token=unk_token,
-            sep_token=sep_token,
-            pad_token=pad_token,
-            cls_token=cls_token,
-            mask_token=mask_token,
-            tokenize_chinese_chars=tokenize_chinese_chars,
-            strip_accents=strip_accents,
-            **kwargs,
-        )
-
-        if not os.path.isfile(vocab_file):
-            raise ValueError(
-                f"Can't find a vocabulary file at path '{vocab_file}'. To load the vocabulary from a Google pretrained"
-                " model use `tokenizer = BertTokenizer.from_pretrained(PRETRAINED_MODEL_NAME)`"
-            )
-        self.vocab = load_vocab(vocab_file)
-        self.ids_to_tokens = collections.OrderedDict([(ids, tok) for tok, ids in self.vocab.items()])
-        self.do_basic_tokenize = do_basic_tokenize
-        if do_basic_tokenize:
-            self.basic_tokenizer = BasicTokenizer(
-                do_lower_case=do_lower_case,
-                never_split=never_split,
-                tokenize_chinese_chars=tokenize_chinese_chars,
-                strip_accents=strip_accents,
-            )
-        self.wordpiece_tokenizer = WordpieceTokenizer(vocab=self.vocab, unk_token=self.unk_token)
-
-    @property
-    def do_lower_case(self):
-        return self.basic_tokenizer.do_lower_case
-
-    @property
-    def vocab_size(self):
-        return len(self.vocab)
-
-    def get_vocab(self):
-        return dict(self.vocab, **self.added_tokens_encoder)
-
-    def _tokenize(self, text):
-        split_tokens = []
-        if self.do_basic_tokenize:
-            for token in self.basic_tokenizer.tokenize(text, never_split=self.all_special_tokens):
-                # If the token is part of the never_split set
-                if token in self.basic_tokenizer.never_split:
-                    split_tokens.append(token)
-                else:
-                    split_tokens += self.wordpiece_tokenizer.tokenize(token)
-        else:
-            split_tokens = self.wordpiece_tokenizer.tokenize(text)
-        return split_tokens
-
-    def _convert_token_to_id(self, token):
-        """Converts a token (str) in an id using the vocab."""
-        return self.vocab.get(token, self.vocab.get(self.unk_token))
-
-    def _convert_id_to_token(self, index):
-        """Converts an index (integer) in a token (str) using the vocab."""
-        return self.ids_to_tokens.get(index, self.unk_token)
-
-    def convert_tokens_to_string(self, tokens):
-        """Converts a sequence of tokens (string) in a single string."""
-        out_string = " ".join(tokens).replace(" ##", "").strip()
-        return out_string
-
-    def build_inputs_with_special_tokens(
-        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
-    ) -> List[int]:
-        """
-        Build model inputs from a sequence or a pair of sequence for sequence classification tasks by concatenating and
-        adding special tokens. A BERT sequence has the following format:
-
-        - single sequence: `[CLS] X [SEP]`
-        - pair of sequences: `[CLS] A [SEP] B [SEP]`
-
-        Args:
-            token_ids_0 (`List[int]`):
-                List of IDs to which the special tokens will be added.
-            token_ids_1 (`List[int]`, *optional*):
-                Optional second list of IDs for sequence pairs.
-
-        Returns:
-            `List[int]`: List of [input IDs](../glossary#input-ids) with the appropriate special tokens.
-        """
-        if token_ids_1 is None:
-            return [self.cls_token_id] + token_ids_0 + [self.sep_token_id]
-        cls = [self.cls_token_id]
-        sep = [self.sep_token_id]
-        return cls + token_ids_0 + sep + token_ids_1 + sep
-
-    def get_special_tokens_mask(
-        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None, already_has_special_tokens: bool = False
-    ) -> List[int]:
-        """
-        Retrieve sequence ids from a token list that has no special tokens added. This method is called when adding
-        special tokens using the tokenizer `prepare_for_model` method.
-
-        Args:
-            token_ids_0 (`List[int]`):
-                List of IDs.
-            token_ids_1 (`List[int]`, *optional*):
-                Optional second list of IDs for sequence pairs.
-            already_has_special_tokens (`bool`, *optional*, defaults to `False`):
-                Whether or not the token list is already formatted with special tokens for the model.
-
-        Returns:
-            `List[int]`: A list of integers in the range [0, 1]: 1 for a special token, 0 for a sequence token.
-        """
-
-        if already_has_special_tokens:
-            return super().get_special_tokens_mask(
-                token_ids_0=token_ids_0, token_ids_1=token_ids_1, already_has_special_tokens=True
-            )
-
-        if token_ids_1 is not None:
-            return [1] + ([0] * len(token_ids_0)) + [1] + ([0] * len(token_ids_1)) + [1]
-        return [1] + ([0] * len(token_ids_0)) + [1]
-
-    def create_token_type_ids_from_sequences(
-        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
-    ) -> List[int]:
-        """
-        Create a mask from the two sequences passed to be used in a sequence-pair classification task. A BERT sequence
-        pair mask has the following format:
-
-        ```
-        0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1
-        | first sequence    | second sequence |
-        ```
-
-        If `token_ids_1` is `None`, this method only returns the first portion of the mask (0s).
-
-        Args:
-            token_ids_0 (`List[int]`):
-                List of IDs.
-            token_ids_1 (`List[int]`, *optional*):
-                Optional second list of IDs for sequence pairs.
-
-        Returns:
-            `List[int]`: List of [token type IDs](../glossary#token-type-ids) according to the given sequence(s).
-        """
-        sep = [self.sep_token_id]
-        cls = [self.cls_token_id]
-        if token_ids_1 is None:
-            return len(cls + token_ids_0 + sep) * [0]
-        return len(cls + token_ids_0 + sep) * [0] + len(token_ids_1 + sep) * [1]
-
-    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
-        index = 0
-        if os.path.isdir(save_directory):
-            vocab_file = os.path.join(
-                save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["vocab_file"]
-            )
-        else:
-            vocab_file = (filename_prefix + "-" if filename_prefix else "") + save_directory
-        with open(vocab_file, "w", encoding="utf-8") as writer:
-            for token, token_index in sorted(self.vocab.items(), key=lambda kv: kv[1]):
-                if index != token_index:
-                    logger.warning(
-                        f"Saving vocabulary to {vocab_file}: vocabulary indices are not consecutive."
-                        " Please check that the vocabulary is not corrupted!"
-                    )
-                    index = token_index
-                writer.write(token + "\n")
-                index += 1
-        return (vocab_file,)
+def int_interp(t: List, trgt_len: int, mode='nearest') -> torch.Tensor:
+    t = torch.tensor(t, dtype=torch.float64)
+    return F.interpolate(t.view(1, 1, -1), size=trgt_len, mode=mode).view(-1).long().tolist()
 
 
-class BasicTokenizer(object):
-    """
-    Constructs a BasicTokenizer that will run basic tokenization (punctuation splitting, lower casing, etc.).
-
-    Args:
-        do_lower_case (`bool`, *optional*, defaults to `True`):
-            Whether or not to lowercase the input when tokenizing.
-        never_split (`Iterable`, *optional*):
-            Collection of tokens which will never be split during tokenization. Only has an effect when
-            `do_basic_tokenize=True`
-        tokenize_chinese_chars (`bool`, *optional*, defaults to `True`):
-            Whether or not to tokenize Chinese characters.
-
-            This should likely be deactivated for Japanese (see this
-            [issue](https://github.com/huggingface/transformers/issues/328)).
-        strip_accents (`bool`, *optional*):
-            Whether or not to strip all accents. If this option is not specified, then it will be determined by the
-            value for `lowercase` (as in the original BERT).
-    """
-
-    def __init__(self, do_lower_case=True, never_split=None, tokenize_chinese_chars=True, strip_accents=None):
-        if never_split is None:
-            never_split = []
-        self.do_lower_case = do_lower_case
-        self.never_split = set(never_split)
-        self.tokenize_chinese_chars = tokenize_chinese_chars
-        self.strip_accents = strip_accents
-
-    def tokenize(self, text, never_split=None):
-        """
-        Basic Tokenization of a piece of text. Split on "white spaces" only, for sub-word tokenization, see
-        WordPieceTokenizer.
-
-        Args:
-            never_split (`List[str]`, *optional*)
-                Kept for backward compatibility purposes. Now implemented directly at the base class level (see
-                [`PreTrainedTokenizer.tokenize`]) List of token not to split.
-        """
-        # union() returns a new set by concatenating the two sets.
-        never_split = self.never_split.union(set(never_split)) if never_split else self.never_split
-        text = self._clean_text(text)
-
-        # This was added on November 1st, 2018 for the multilingual and Chinese
-        # models. This is also applied to the English models now, but it doesn't
-        # matter since the English models were not trained on any Chinese data
-        # and generally don't have any Chinese data in them (there are Chinese
-        # characters in the vocabulary because Wikipedia does have some Chinese
-        # words in the English Wikipedia.).
-        if self.tokenize_chinese_chars:
-            text = self._tokenize_chinese_chars(text)
-        orig_tokens = whitespace_tokenize(text)
-        split_tokens = []
-        for token in orig_tokens:
-            if token not in never_split:
-                if self.do_lower_case:
-                    token = token.lower()
-                    if self.strip_accents is not False:
-                        token = self._run_strip_accents(token)
-                elif self.strip_accents:
-                    token = self._run_strip_accents(token)
-            split_tokens.extend(self._run_split_on_punc(token, never_split))
-
-        output_tokens = whitespace_tokenize(" ".join(split_tokens))
-        return output_tokens
-
-    def _run_strip_accents(self, text):
-        """Strips accents from a piece of text."""
-        text = unicodedata.normalize("NFD", text)
-        output = []
-        for char in text:
-            cat = unicodedata.category(char)
-            if cat == "Mn":
-                continue
-            output.append(char)
-        return "".join(output)
-
-    def _run_split_on_punc(self, text, never_split=None):
-        """Splits punctuation on a piece of text."""
-        if never_split is not None and text in never_split:
-            return [text]
-        chars = list(text)
-        i = 0
-        start_new_word = True
-        output = []
-        while i < len(chars):
-            char = chars[i]
-            if _is_punctuation(char):
-                output.append([char])
-                start_new_word = True
-            else:
-                if start_new_word:
-                    output.append([])
-                start_new_word = False
-                output[-1].append(char)
-            i += 1
-
-        return ["".join(x) for x in output]
-
-    def _tokenize_chinese_chars(self, text):
-        """Adds whitespace around any CJK character."""
-        output = []
-        for char in text:
-            cp = ord(char)
-            if self._is_chinese_char(cp):
-                output.append(" ")
-                output.append(char)
-                output.append(" ")
-            else:
-                output.append(char)
-        return "".join(output)
-
-    def _is_chinese_char(self, cp):
-        """Checks whether CP is the codepoint of a CJK character."""
-        # This defines a "chinese character" as anything in the CJK Unicode block:
-        #   https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_(Unicode_block)
-        #
-        # Note that the CJK Unicode block is NOT all Japanese and Korean characters,
-        # despite its name. The modern Korean Hangul alphabet is a different block,
-        # as is Japanese Hiragana and Katakana. Those alphabets are used to write
-        # space-separated words, so they are not treated specially and handled
-        # like the all of the other languages.
-        if (
-            (cp >= 0x4E00 and cp <= 0x9FFF)
-            or (cp >= 0x3400 and cp <= 0x4DBF)  #
-            or (cp >= 0x20000 and cp <= 0x2A6DF)  #
-            or (cp >= 0x2A700 and cp <= 0x2B73F)  #
-            or (cp >= 0x2B740 and cp <= 0x2B81F)  #
-            or (cp >= 0x2B820 and cp <= 0x2CEAF)  #
-            or (cp >= 0xF900 and cp <= 0xFAFF)
-            or (cp >= 0x2F800 and cp <= 0x2FA1F)  #
-        ):  #
-            return True
-
-        return False
-
-    def _clean_text(self, text):
-        """Performs invalid character removal and whitespace cleanup on text."""
-        output = []
-        for char in text:
-            cp = ord(char)
-            if cp == 0 or cp == 0xFFFD or _is_control(char):
-                continue
-            if _is_whitespace(char):
-                output.append(" ")
-            else:
-                output.append(char)
-        return "".join(output)
+def get_word_type(word: str):
+    # 1: lower case, 2: upper case, 3: title case, 4: other
+    
+    # remove non-alphabetic characters
+    word = re.sub('[^a-zA-Z]+', '', word)
+    
+    if word.islower():
+        return 1
+    elif word.isupper():
+        return 2
+    elif word.istitle():
+        return 3
+    else:
+        return 4
 
 
 class WordpieceTokenizer(object):
     """Runs WordPiece tokenization."""
 
-    def __init__(self, vocab, unk_token, max_input_chars_per_word=100):
+    def __init__(self, vocab: List[str], unk_token, max_input_chars_per_word=100):
         self.vocab = vocab
         self.unk_token = unk_token
         self.max_input_chars_per_word = max_input_chars_per_word
@@ -603,3 +222,144 @@ class WordpieceTokenizer(object):
             else:
                 output_tokens.extend(sub_tokens)
         return output_tokens
+    
+    def token_to_id(self, token: str) -> int:
+        """Converts a token (str) in an id using the vocab."""
+        try:
+            return self.vocab.index(token)
+        except ValueError:
+            return self.vocab.index(self.unk_token)
+    
+    def id_to_token(self, index: int) -> str:
+        """Converts an index (integer) in a token (str) using the vocab."""
+        return self.vocab[index]
+    
+    def convert_tokens_to_ids(self, tokens: List[str]) -> List[int]:
+        """Converts a sequence of tokens (str) in a sequence of ids (int) using the vocab."""
+        return [self.token_to_id(token) for token in tokens]
+    
+    def convert_ids_to_tokens(self, ids: List[int]) -> List[str]:
+        """Converts a sequence of ids (int) in a sequence of tokens (str) using the vocab."""
+        return [self.id_to_token(index) for index in ids]
+    
+    def convert_tokens_to_string(self, tokens: List[str]) -> str:
+        """Converts a sequence of tokens (str) in a single string."""
+        out_string = "".join(tokens).replace("##", "").strip()
+        return out_string
+    
+    def convert_string_to_model_inputs(self, text:str, phones:str, return_dict=False):
+        """Converts a string into entire input for a PnGnW BERT model."""
+        # normalize text to match with phoneme sequence as closely as possible
+        text = normalize_numbers(text)
+        text = filter_text(text, preserve_case=True)
+        
+        # split sequences into words and assign word position IDs
+        # "Saying that it was."
+        # "{S EY1 IH0 NG} {DH AE1 T} {IH1 T} {W AA1 Z}."
+        # becomes
+        # {0: {'word': "Saying", 'phones': ["S", "EY1", "IH0", "NG"]},
+        text_words = [w.strip() for w in text.strip().split(" ") if w.strip()]
+        phone_words = [w.strip() for w in split_arpa(phones.strip()) if w.strip()]
+        if len(text_words) != len(phone_words):
+            raise NotImplementedError(
+                'Number of words in text and phoneme sequences do not match, which is not supported yet.\n'
+                f'Text: "{text.strip()}"\n'
+                f'Phones: "{phones.strip()}"\n'
+                f'\nZipped: {list(zip(text_words, phone_words))}\n\n'
+                f'Number of words in text: {len(text_words)}\n'
+                f'Number of words in phones: {len(phone_words)}\n')
+        words = []
+        for i, (text_word, phone_word) in enumerate(zip(text_words, phone_words)):
+            # phone_word = '{S EY1 IH0 NG}'
+            words.append({
+                'word'  : text_word,
+                'phones': phone_word.split(" "),
+                'arpa_failed': text_word.strip().lower() == phone_word.strip().lower(),
+            })
+
+        # Apply wordpiece tokenization to each word
+        # "Saying." -> ["Say", "##ing", "."]
+        for word in words:
+            word['tokens'] = self.tokenize(word['word'])
+        
+        # Convert tokens to IDs
+        # ["Say", "##ing", "."] -> [688, 1013, 39]
+        # ["S", "EY1", "IH0", "NG", "."] -> [105, 101, 102, 103, 39]
+        # [["S","a","y", " ", "i","n","g", "."] -> [1, 9, 4, 10, 41, 13, 34, 39]
+        for word in words:
+            word['token_ids'] = self.convert_tokens_to_ids(word['tokens'])
+            word['phone_ids'] = self.convert_tokens_to_ids(word['phones'])
+            word['letter_ids'] = self.convert_tokens_to_ids(list(word['word']))
+
+        # Merge into single char+phone+word sequence
+        # "Saying.[SEP]S EY1 IH0 NG."
+        seq_word_type = []
+        seq_word_ids = []
+        seq_char_ids = []
+        seq_segment_ids = []
+        seq_rel_word_pos = []
+        seq_rel_char_pos = []
+        seq_abs_word_pos = []
+        seq_abs_char_pos = []
+        seq_subword_pos = []
+        seq_bad_arpa = []
+        cur_rel_word_pos = 0
+        cur_rel_char_pos = 0
+        cur_abs_word_pos = 0
+        cur_abs_char_pos = 0
+        # You ever wonder if there's too many variables? Lol
+        for segment_id, mode in enumerate(['letter', 'phone']):
+            if mode == 'phone':
+                cur_rel_word_pos = 0  # reset pos embeds that are relative to segment start
+                cur_rel_char_pos = 0  # reset pos embeds that are relative to segment start
+    
+            for word in words:
+                # word.keys() = ['word', 'phones', 'tokens', 'token_ids', 'phone_ids', 'letter_ids']
+                char_ids = word['letter_ids'] if mode == 'letter' else word['phone_ids']
+                seq_char_ids.extend(char_ids)
+        
+                word_ids_ = int_interp(word['token_ids'], trgt_len=len(char_ids), mode='nearest')
+                seq_word_ids.extend(word_ids_)
+        
+                word_type = get_word_type(word['word'])  # int
+                seq_word_type.extend([word_type] * len(char_ids))
+        
+                seq_segment_ids.extend([segment_id] * len(char_ids))
+                
+                seq_bad_arpa.extend([word['arpa_failed'] if mode == 'phone' else False] * len(char_ids))
+                
+                for i in range(len(char_ids)):
+                    seq_rel_word_pos.append(cur_rel_word_pos)
+                    seq_rel_char_pos.append(cur_rel_char_pos)
+                    seq_abs_word_pos.append(cur_abs_word_pos)
+                    seq_abs_char_pos.append(cur_abs_char_pos)
+                    seq_subword_pos.append(i)
+                    cur_rel_char_pos += 1
+                    cur_abs_char_pos += 1
+                cur_rel_word_pos += 1
+                cur_abs_word_pos += 1
+        
+        if return_dict:
+            return dict(
+                seq_word_type=seq_word_type,
+                seq_word_ids=seq_word_ids,
+                seq_char_ids=seq_char_ids,
+                seq_segment_ids=seq_segment_ids,
+                seq_rel_word_pos=seq_rel_word_pos,
+                seq_rel_char_pos=seq_rel_char_pos,
+                seq_abs_word_pos=seq_abs_word_pos,
+                seq_abs_char_pos=seq_abs_char_pos,
+                seq_subword_pos=seq_subword_pos,
+                seq_bad_arpa=seq_bad_arpa)
+        else:
+            return (
+                seq_word_type,
+                seq_word_ids,
+                seq_char_ids,
+                seq_segment_ids,
+                seq_rel_word_pos,
+                seq_rel_char_pos,
+                seq_abs_word_pos,
+                seq_abs_char_pos,
+                seq_subword_pos,
+                seq_bad_arpa)

@@ -17,5 +17,5 @@ else:
 __version__ = "1.0.0"
 
 # Data module
-from h2p_parser import data
+from pngnwbert.h2p_parser import data
 DATA_PATH = files(data.__name__)

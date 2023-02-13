@@ -3,7 +3,7 @@
 from __future__ import annotations
 from os.path import exists
 import json
-import h2p_parser.pos_parser as pos_parser
+import pngnwbert.h2p_parser.pos_parser as pos_parser
 from . import DATA_PATH
 
 

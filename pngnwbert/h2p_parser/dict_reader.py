@@ -3,7 +3,7 @@ import re
 
 from tqdm import tqdm
 
-import h2p_parser.format_ph as ph
+import pngnwbert.h2p_parser.format_ph as ph
 from . import DATA_PATH
 
 _dict_primary = 'cmudict.dict'

@@ -26,6 +26,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.utils.checkpoint
 from torch import nn, Tensor
+import torch.nn.functional as F
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from pngnwbert.transformers_bert.pytorch_utils import apply_chunking_to_forward
 from pngnwbert.transformers_bert.generic import ModelOutput
@@ -157,33 +158,6 @@ class BaseModelOutputWithPoolingAndCrossAttentions(ModelOutput):
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
 
-@dataclass
-class MaskedLMOutput(ModelOutput):
-    """
-    Base class for masked language models outputs.
-
-    Args:
-        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
-            Masked language modeling (MLM) loss.
-        logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
-            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
-        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
-            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
-
-            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
-        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-            sequence_length)`.
-
-            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
-            heads.
-    """
-
-    loss: Optional[torch.FloatTensor] = None
-    logits: torch.FloatTensor = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 class PnGBertEmbeddings(nn.Module):
     """Construct the embeddings from word, grapheme, phoneme, word-position, g/p-position and segment embeddings."""
@@ -192,16 +166,21 @@ class PnGBertEmbeddings(nn.Module):
         super().__init__()
         # word embeddings
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
-        self.rel_word_pos_embeddings = nn.Embedding(config.max_position_embeddings//2, config.hidden_size)
-        self.abs_word_pos_embeddings = nn.Embedding(config.max_position_embeddings   , config.hidden_size)
+        self.rel_word_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.abs_word_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        
+        # word type embeddings (capitalization)
+        self.word_type_embeddings = nn.Embedding(6, config.hidden_size, padding_idx=config.pad_token_id)
+        # 0:padding, 1: lower case, 2: upper case, 3: title case, 4: other
+        # e.g: "hello" -> 1, "HELLO" -> 2, "Hello" -> 3, "hELLO" -> 4
         
         # grapheme and phoneme embeddings
-        self.char_embeddings = nn.Embedding(config.char_vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
-        self.res_char_pos_embeddings = nn.Embedding(config.max_position_embeddings//2, config.hidden_size)
-        self.abs_char_pos_embeddings = nn.Embedding(config.max_position_embeddings   , config.hidden_size)
+        self.char_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
+        self.rel_char_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.abs_char_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         
         # position of grapheme or phoneme within each word
-        self.subword_pos_embeddings = nn.Embedding(32, config.hidden_size)
+        self.subword_pos_embeddings = nn.Embedding(64, config.hidden_size)
         
         # segment embeddings (aka, is this the grapheme or phoneme sequence)
         self.segment_embeddings = nn.Embedding(2, config.hidden_size)
@@ -212,13 +191,12 @@ class PnGBertEmbeddings(nn.Module):
         # any TensorFlow checkpoint file
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob) # SHOULD KEEP?
-        # position_ids (1, len position emb) is contiguous in memory and exported when serialized
-        self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
 
     def forward(
         self,
         input_word_ids: Optional[torch.LongTensor] = None,
         input_char_ids: Optional[torch.LongTensor] = None,
+        word_type_ids: Optional[torch.LongTensor] = None,
         rel_word_pos_ids: Optional[torch.LongTensor] = None,
         abs_word_pos_ids: Optional[torch.LongTensor] = None,
         rel_char_pos_ids: Optional[torch.LongTensor] = None,
@@ -229,6 +207,7 @@ class PnGBertEmbeddings(nn.Module):
         word_embeddings = self.word_embeddings(input_word_ids)
         rel_word_pos_embeddings = self.rel_word_pos_embeddings(rel_word_pos_ids)
         abs_word_pos_embeddings = self.abs_word_pos_embeddings(abs_word_pos_ids)
+        word_type_embeddings = self.word_type_embeddings(word_type_ids)
         
         char_embeddings = self.char_embeddings(input_char_ids)
         rel_char_pos_embeddings = self.rel_char_pos_embeddings(rel_char_pos_ids)
@@ -238,8 +217,9 @@ class PnGBertEmbeddings(nn.Module):
         
         segment_embeddings = self.segment_embeddings(segment_ids)
         
-        embeddings = word_embeddings + rel_word_pos_embeddings + abs_word_pos_embeddings + char_embeddings \
-                     + rel_char_pos_embeddings + abs_char_pos_embeddings + subword_pos_embeddings + segment_embeddings
+        embeddings = word_embeddings + rel_word_pos_embeddings + abs_word_pos_embeddings + word_type_embeddings \
+                     + char_embeddings + rel_char_pos_embeddings + abs_char_pos_embeddings + subword_pos_embeddings \
+                     + segment_embeddings
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
@@ -703,19 +683,16 @@ class BertPreTrainedModel(nn.Module):
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
     """
-
-    config_class = BertConfig
-    base_model_prefix = "bert"
-    supports_gradient_checkpointing = True
-    _keys_to_ignore_on_load_missing = [r"position_ids"]
-
     def __init__(self, config, *inputs, **kwargs):
         super().__init__()
         # Save config and origin of the pretrained weights if given in model
         self.config = config
-        self.name_or_path = config.name_or_path
         self.warnings_issued = {}
-
+    
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype
+    
     def post_init(self):
         """
         A method executed at the end of each Transformer model initialization, to execute code that needs the model's
@@ -879,6 +856,13 @@ class BertPreTrainedModel(nn.Module):
             head_mask = [None] * num_hidden_layers
 
         return head_mask
+    
+    @classmethod
+    def from_path(cls, path:str):
+        sd = torch.load(path)
+        model = cls(**sd['_extra_state']['kwargs'])
+        model.load_state_dict(sd['state_dict'])
+        return model
 
 
 # The bare Bert Model transformer outputting raw hidden-states without any specific head on top.
@@ -895,14 +879,12 @@ class BertModel(BertPreTrainedModel):
     `add_cross_attention` set to `True`; an `encoder_hidden_states` is then expected as an input to the forward pass.
     """
 
-    def __init__(self, config, add_pooling_layer=False):
+    def __init__(self, config):
         super().__init__(config)
         self.config = config
 
         self.embeddings = PnGBertEmbeddings(config)
         self.encoder = BertEncoder(config)
-
-        self.pooler = BertPooler(config) if add_pooling_layer else None
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -911,6 +893,7 @@ class BertModel(BertPreTrainedModel):
         self,
         input_word_ids  : Optional[torch.LongTensor] = None,
         input_char_ids  : Optional[torch.LongTensor] = None,
+        word_type_ids   : Optional[torch.LongTensor] = None,
         rel_word_pos_ids: Optional[torch.LongTensor] = None,
         abs_word_pos_ids: Optional[torch.LongTensor] = None,
         rel_char_pos_ids: Optional[torch.LongTensor] = None,
@@ -994,6 +977,7 @@ class BertModel(BertPreTrainedModel):
         embedding_output = self.embeddings(
             input_word_ids=input_word_ids,
             input_char_ids=input_char_ids,
+            word_type_ids=word_type_ids,
             rel_word_pos_ids=rel_word_pos_ids,
             abs_word_pos_ids=abs_word_pos_ids,
             rel_char_pos_ids=rel_char_pos_ids,
@@ -1014,14 +998,12 @@ class BertModel(BertPreTrainedModel):
             return_dict=return_dict,
         )
         sequence_output = encoder_outputs[0]
-        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
         if not return_dict:
-            return (sequence_output, pooled_output) + encoder_outputs[1:]
+            return encoder_outputs
 
         return BaseModelOutputWithPoolingAndCrossAttentions(
             last_hidden_state=sequence_output,
-            pooler_output=pooled_output,
             past_key_values=encoder_outputs.past_key_values,
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
@@ -1037,67 +1019,66 @@ class PnGBertHead(nn.Module):
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         
         # Linear output logits for each word vocab
-        self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
-        self.decoder.bias = self.bias
+        self.word_decoder = nn.Linear(config.hidden_size, config.vocab_size)
+        self.word_decoder.bias.data.zero_()
         
         # Linear output logits for each char vocab
-        self.decoder = nn.Linear(config.hidden_size, config.char_vocab_size, bias=False)
-        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
-        self.decoder.bias = self.bias
+        self.char_decoder = nn.Linear(config.hidden_size, config.vocab_size)
+        self.char_decoder.bias.data.zero_()
         
         # Linear output for DeepMoji aux loss
-        self.decoder = nn.Linear(config.hidden_size, config.deepmoji_size, bias=True)
-        self.decoder.bias.data.zero_()
+        self.moji_decoder = nn.Linear(config.hidden_size, config.deepmoji_size)
+        self.moji_decoder.bias.data.zero_()
     
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.transform_act_fn(hidden_states)
         hidden_states = self.LayerNorm(hidden_states)
-        vocab_logits = self.decoder(hidden_states)
-        return vocab_logits
+        pred_word_logits = self.char_decoder(hidden_states)
+        pred_char_logits = self.word_decoder(hidden_states)
+        pred_moji_latent = self.moji_decoder(hidden_states)
+        return pred_word_logits, pred_char_logits, pred_moji_latent
 
 """Bert Model with a `language modeling` head on top."""
-class BertForMaskedLM(BertPreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = [r"pooler"]
-    _keys_to_ignore_on_load_missing = [r"position_ids", r"predictions.decoder.bias", r"cls.predictions.decoder.weight"]
-    
+class PnGBert(BertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         
-        if config.is_decoder:
-            logger.warning(
-                "If you want to use `BertForMaskedLM` make sure `config.is_decoder=False` for "
-                "bi-directional self-attention."
-            )
-        
-        self.bert = BertModel(config, add_pooling_layer=False)
+        self.bert = BertModel(config)
         self.cls = PnGBertHead(config)
         
         # Initialize weights and apply final processing
         self.post_init()
     
-    def get_output_embeddings(self):
-        return self.cls.predictions.decoder
-    
-    def set_output_embeddings(self, new_embeddings):
-        self.cls.predictions.decoder = new_embeddings
+    def get_extra_state(self) -> dict:
+        return {
+            'kwargs': {
+                'config': self.config,
+            }
+        }
     
     def forward(
         self,
-        input_ids: Optional[torch.Tensor] = None,
+        input_word_ids  : Optional[torch.LongTensor] = None,
+        input_char_ids  : Optional[torch.LongTensor] = None,
+        word_type_ids   : Optional[torch.LongTensor] = None,
+        rel_word_pos_ids: Optional[torch.LongTensor] = None,
+        abs_word_pos_ids: Optional[torch.LongTensor] = None,
+        rel_char_pos_ids: Optional[torch.LongTensor] = None,
+        abs_char_pos_ids: Optional[torch.LongTensor] = None,
+        subword_pos_ids : Optional[torch.LongTensor] = None,
+        segment_ids     : Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
+        seq_word_ids_target: Optional[torch.Tensor] = None,
+        seq_char_ids_target: Optional[torch.Tensor] = None,
+        seq_moji_target    : Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple[torch.Tensor], MaskedLMOutput]:
+    ) -> Union[Tuple[torch.Tensor], dict]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Labels for computing the masked language modeling loss. Indices should be in `[-100, 0, ...,
@@ -1107,35 +1088,53 @@ class BertForMaskedLM(BertPreTrainedModel):
         
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-        outputs = self.bert(
-            input_ids,
+        outputs = self.bert.forward(
+            input_word_ids=input_word_ids,
+            input_char_ids=input_char_ids,
+            word_type_ids=word_type_ids,
+            rel_word_pos_ids=rel_word_pos_ids,
+            abs_word_pos_ids=abs_word_pos_ids,
+            rel_char_pos_ids=rel_char_pos_ids,
+            abs_char_pos_ids=abs_char_pos_ids,
+            subword_pos_ids=subword_pos_ids,
+            segment_ids=segment_ids,
             attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
             head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-
+        
         sequence_output = outputs[0]
-        prediction_scores = self.cls(sequence_output)
-
-        masked_lm_loss = None
-        if labels is not None:
-            loss_fct = CrossEntropyLoss()  # -100 index = padding token
-            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
-
+        pred_word_logits, pred_char_logits, pred_moji_latent = self.cls(sequence_output)
+        
+        losses = None
+        has_gt_word = seq_word_ids_target is not None
+        has_gt_char = seq_char_ids_target is not None
+        has_gt_moji = seq_moji_target is not None
+        if has_gt_word or has_gt_char or has_gt_moji:
+            loss_func = CrossEntropyLoss()  # -100 index = padding token
+            masked_word_loss = loss_func(pred_word_logits.view(-1, self.config.vocab_size), seq_word_ids_target.view(-1))
+            masked_char_loss = loss_func(pred_char_logits.view(-1, self.config.vocab_size), seq_char_ids_target.view(-1))
+            masked_moji_loss = F.l1_loss(pred_moji_latent, seq_moji_target, reduction='none')\
+                .masked_fill_(seq_moji_target.ne(0.0), 0).sum() / seq_moji_target.ne(0.0).sum()
+            losses = [masked_word_loss, masked_char_loss, masked_moji_loss]
+        
         if not return_dict:
-            output = (prediction_scores,) + outputs[2:]
-            return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
-
-        return MaskedLMOutput(
-            loss=masked_lm_loss,
-            logits=prediction_scores,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+            output = outputs[2:]
+            return (*losses, *output) if losses is not None else output
+        out_dict = {}
+        if losses is not None:
+            out_dict["word_loss"] = losses[0]
+            out_dict["char_loss"] = losses[1]
+            out_dict["moji_loss"] = losses[2]
+        return {
+            **out_dict,
+            "word_logits": pred_word_logits,
+            "char_logits": pred_char_logits,
+            "moji_latent": pred_moji_latent,
+            "hidden_states": outputs.hidden_states,
+            "attentions": outputs.attentions,
+        }
