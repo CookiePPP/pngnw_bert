@@ -1119,7 +1119,7 @@ class PnGBert(BertPreTrainedModel):
             masked_word_loss = loss_func(pred_word_logits.view(-1, self.config.vocab_size), seq_word_ids_target.view(-1))
             masked_char_loss = loss_func(pred_char_logits.view(-1, self.config.vocab_size), seq_char_ids_target.view(-1))
             masked_moji_loss = F.l1_loss(pred_moji_latent, seq_moji_target, reduction='none')\
-                .masked_fill_(seq_moji_target.ne(0.0), 0).sum() / seq_moji_target.ne(0.0).sum()
+                .masked_fill_(~seq_moji_target.ne(0.0), 0).sum() / seq_moji_target.ne(0.0).sum()
             losses = [masked_word_loss, masked_char_loss, masked_moji_loss]
         
         if not return_dict:
