@@ -142,7 +142,7 @@ class Dataset(torch.utils.data.Dataset):
                 seq_char_ids_input.append(seq_char_ids[i])
                 seq_word_ids_target.append(NO_TARGET_ID)
                 seq_char_ids_target.append(NO_TARGET_ID)
-                
+        
         return seq_word_ids_input, seq_char_ids_input, seq_word_ids_target, seq_char_ids_target
     
     def getitem(self, index):
@@ -209,6 +209,7 @@ class Collate: # collate function for DataLoader
         self.pad_token_id = pad_token_id
     
     def __call__(self, batch: List[Dict[str, List[int]]]):
+        """Converts a list of sequences into a batch of padded tensor sequences."""
         batch_size = len(batch)
         
         # get the max sequence length
@@ -227,13 +228,18 @@ class Collate: # collate function for DataLoader
             abs_char_pos_ids = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
             subword_pos_ids = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
             
-            seq_word_ids_input = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
-            seq_char_ids_input = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
+            if 'seq_word_ids_input' in batch[0]:
+                seq_word_ids_input = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
+            if 'seq_char_ids_input' in batch[0]:
+                seq_char_ids_input = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
             
-            seq_word_ids_target = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
-            seq_char_ids_target = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
+            if 'seq_word_ids_target' in batch[0]:
+                seq_word_ids_target = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
+            if 'seq_char_ids_target' in batch[0]:
+                seq_char_ids_target = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
             
-            seq_moji_target = torch.zeros((batch_size, max_seq_len, 2304), dtype=torch.float)
+            if 'moji_latent' in batch[0]:
+                seq_moji_target = torch.zeros((batch_size, max_seq_len, 2304), dtype=torch.float)
         
         for i, d in enumerate(batch):
             word_type_ids[i, :len(d['seq_word_type'])] = torch.tensor(d['seq_word_type'], dtype=torch.long)
@@ -246,19 +252,24 @@ class Collate: # collate function for DataLoader
             abs_word_pos_ids[i, :len(d['seq_abs_word_pos'])] = torch.tensor(d['seq_abs_word_pos'], dtype=torch.long)
             abs_char_pos_ids[i, :len(d['seq_abs_char_pos'])] = torch.tensor(d['seq_abs_char_pos'], dtype=torch.long)
             subword_pos_ids[i, :len(d['seq_subword_pos'])] = torch.tensor(d['seq_subword_pos'], dtype=torch.long)
+
+            if 'seq_word_ids_input' in batch[0]:
+                seq_word_ids_input[i, :len(d['seq_word_ids_input'])] = torch.tensor(d['seq_word_ids_input'], dtype=torch.long)
+            if 'seq_char_ids_input' in batch[0]:
+                seq_char_ids_input[i, :len(d['seq_char_ids_input'])] = torch.tensor(d['seq_char_ids_input'], dtype=torch.long)
             
-            seq_word_ids_input[i, :len(d['seq_word_ids_input'])] = torch.tensor(d['seq_word_ids_input'], dtype=torch.long)
-            seq_char_ids_input[i, :len(d['seq_char_ids_input'])] = torch.tensor(d['seq_char_ids_input'], dtype=torch.long)
-            
-            seq_word_ids_target[i, :len(d['seq_word_ids_target'])] = torch.tensor(d['seq_word_ids_target'], dtype=torch.long)
-            seq_char_ids_target[i, :len(d['seq_char_ids_target'])] = torch.tensor(d['seq_char_ids_target'], dtype=torch.long)
-            
-            seq_moji_target[i, :len(d['seq_char_ids']), :] = d['moji_latent'] # [1, 2304] is broadcasted to seq len
+            if 'seq_word_ids_target' in batch[0]:
+                seq_word_ids_target[i, :len(d['seq_word_ids_target'])] = torch.tensor(d['seq_word_ids_target'], dtype=torch.long)
+            if 'seq_char_ids_target' in batch[0]:
+                seq_char_ids_target[i, :len(d['seq_char_ids_target'])] = torch.tensor(d['seq_char_ids_target'], dtype=torch.long)
+
+            if 'moji_latent' in batch[0]:
+                seq_moji_target[i, :len(d['seq_char_ids']), :] = d['moji_latent'] # [1, 2304] is broadcasted to seq len
         
-        return {
+        out_dict = {
             'word_type_ids': word_type_ids,
-            #'input_word_ids': input_word_ids,
-            #'input_char_ids': input_char_ids,
+            'input_word_ids': seq_word_ids_input if 'seq_word_ids_input' in batch[0] else input_word_ids,
+            'input_char_ids': seq_char_ids_input if 'seq_char_ids_input' in batch[0] else input_char_ids,
             
             'segment_ids': segment_ids,
             'rel_word_pos_ids': rel_word_pos_ids,
@@ -266,12 +277,14 @@ class Collate: # collate function for DataLoader
             'abs_word_pos_ids': abs_word_pos_ids,
             'abs_char_pos_ids': abs_char_pos_ids,
             'subword_pos_ids': subword_pos_ids,
-            
-            'input_word_ids': seq_word_ids_input, # use "*_input" as input tensor
-            'input_char_ids': seq_char_ids_input, # use "*_input" as input tensor
-            
-            'seq_word_ids_target': seq_word_ids_target,
-            'seq_char_ids_target': seq_char_ids_target,
-            
-            'seq_moji_target': seq_moji_target,
         }
+        
+        # maybe add loss targets
+        if 'seq_word_ids_target' in batch[0]:
+            out_dict['seq_word_ids_target'] = seq_word_ids_target
+        if 'seq_char_ids_target' in batch[0]:
+            out_dict['seq_char_ids_target'] = seq_char_ids_target
+        if 'seq_moji_target' in batch[0]:
+            out_dict['seq_moji_target'] = seq_moji_target
+        
+        return out_dict

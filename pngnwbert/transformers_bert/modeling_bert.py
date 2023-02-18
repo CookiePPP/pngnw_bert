@@ -691,7 +691,11 @@ class BertPreTrainedModel(nn.Module):
     
     @property
     def dtype(self):
-        return next(self.parameters()).dtype
+        return next(p for p in self.parameters() if torch.is_floating_point(p)).dtype
+    
+    @property
+    def device(self):
+        return next(self.parameters()).device
     
     def post_init(self):
         """
@@ -860,8 +864,14 @@ class BertPreTrainedModel(nn.Module):
     @classmethod
     def from_path(cls, path:str):
         sd = torch.load(path)
+        
+        # remove PtL formatting
+        if 'state_dict' in sd:
+            sd = sd['state_dict']
+        sd = {k[6:] if 'model.' in k else k: v for k, v in sd.items()}
+        
         model = cls(**sd['_extra_state']['kwargs'])
-        model.load_state_dict(sd['state_dict'])
+        model.load_state_dict(sd)
         return model
 
 
@@ -1054,8 +1064,12 @@ class PnGBert(BertPreTrainedModel):
         return {
             'kwargs': {
                 'config': self.config,
-            }
+            },
+            'class': 'pngnwbert.transformers_bert.modeling_bert.PnGBert',
         }
+    
+    def set_extra_state(self, state):
+        pass # required to avoid NotImplementedError
     
     def forward(
         self,
@@ -1137,4 +1151,5 @@ class PnGBert(BertPreTrainedModel):
             "moji_latent": pred_moji_latent,
             "hidden_states": outputs.hidden_states,
             "attentions": outputs.attentions,
+            "last_hidden_state": outputs.last_hidden_state,
         }
