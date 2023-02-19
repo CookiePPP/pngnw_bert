@@ -6,6 +6,10 @@ from typing import List, Dict
 import torch
 from unidecode import unidecode
 
+from pngnwbert.torchmoji.model_def import torchmoji_emojis
+from pngnwbert.torchmoji.global_variables import PRETRAINED_PATH, VOCAB_PATH
+from pngnwbert.torchmoji.global_variables import NB_EMOJI_CLASSES
+
 from pngnwbert.transformers_bert.tokenization_bert import WordpieceTokenizer
 from pngnwbert.h2p_parser.cmudictext import CMUDictExt
 CMUDictExt = CMUDictExt()
@@ -48,6 +52,9 @@ class Dataset(torch.utils.data.Dataset):
         self.path = path # path to dataset.txt file (a tsv with id,text,phoneme)
         self.n_lines = len(open(self.path, 'r').readlines())
         self.tokenizer = WordpieceTokenizer(vocab=vocab, unk_token='MASKTOKEN')
+        torchmoji = torchmoji_emojis(PRETRAINED_PATH)
+        self.torchmoji_final_dropout = torchmoji.final_dropout
+        self.torchmoji_output_layer = torchmoji.output_layer
         
         self.mlm_prob = mlm_prob # chance the model has to infer a word from context only
         self.g2p_prob = g2p_prob # chance the model has to infer a phoneme from it's grapheme counterpart
@@ -85,11 +92,13 @@ class Dataset(torch.utils.data.Dataset):
         # randomly assign a task for each word
         word_tasks = []
         for i in range(n_words):
+            none_p = 1.0 - self.mlm_prob - self.g2p_prob - self.p2g_prob
             task = weighted_choice([
                 ('mlm', self.mlm_prob),
                 ('g2p', self.g2p_prob),
                 ('p2g', self.p2g_prob),
-                ('none', 1.0 - self.mlm_prob - self.g2p_prob - self.p2g_prob)
+                ('copy', none_p/2),
+                ('none', none_p/2),
             ])
             word_tasks.append(task)
 
@@ -136,6 +145,12 @@ class Dataset(torch.utils.data.Dataset):
                 seq_char_ids_input.append(MASK_ID)
                 seq_word_ids_target.append(NO_TARGET_ID)
                 seq_char_ids_target.append(seq_char_ids[i])
+            elif task == 'copy':
+                # no masking, no target
+                seq_word_ids_input.append(seq_word_ids[i])
+                seq_char_ids_input.append(seq_char_ids[i])
+                seq_word_ids_target.append(seq_word_ids[i])
+                seq_char_ids_target.append(seq_char_ids[i])
             else:
                 # no masking, no target
                 seq_word_ids_input.append(seq_word_ids[i])
@@ -161,6 +176,8 @@ class Dataset(torch.utils.data.Dataset):
                 self.get_masked_inputs(seq_word_ids, seq_char_ids, seq_segment_ids, seq_rel_word_pos, seq_bad_arpa)
             
             moji_latent = torch.load(os.path.join(os.path.split(self.path)[0], 'torchmoji', f'{id}.pt'))
+            moji_latent = self.torchmoji_final_dropout(moji_latent)
+            moji_probs = self.torchmoji_output_layer(moji_latent.to(dtype=next(self.torchmoji_output_layer.parameters()).dtype))
             
             return dict(
                 id=id,
@@ -182,7 +199,8 @@ class Dataset(torch.utils.data.Dataset):
                 seq_word_ids_target=seq_word_ids_target,
                 seq_char_ids_target=seq_char_ids_target,
     
-                moji_latent = moji_latent
+                #moji_latent = moji_latent,
+                moji_probs = moji_probs,
             )
     
     def __getitem__(self, index, ignore_exception=True):
@@ -240,6 +258,9 @@ class Collate: # collate function for DataLoader
             
             if 'moji_latent' in batch[0]:
                 seq_moji_target = torch.zeros((batch_size, max_seq_len, 2304), dtype=torch.float)
+            
+            if 'moji_probs' in batch[0]:
+                seq_moji_target = torch.zeros((batch_size, max_seq_len, NB_EMOJI_CLASSES), dtype=torch.float)
         
         for i, d in enumerate(batch):
             word_type_ids[i, :len(d['seq_word_type'])] = torch.tensor(d['seq_word_type'], dtype=torch.long)
@@ -265,6 +286,9 @@ class Collate: # collate function for DataLoader
 
             if 'moji_latent' in batch[0]:
                 seq_moji_target[i, :len(d['seq_char_ids']), :] = d['moji_latent'] # [1, 2304] is broadcasted to seq len
+            
+            if 'moji_probs' in batch[0]:
+                seq_moji_target[i, :len(d['seq_char_ids']), :] = d['moji_probs'] # [1, 64] is broadcasted to seq len
         
         out_dict = {
             'word_type_ids': word_type_ids,
@@ -284,7 +308,7 @@ class Collate: # collate function for DataLoader
             out_dict['seq_word_ids_target'] = seq_word_ids_target
         if 'seq_char_ids_target' in batch[0]:
             out_dict['seq_char_ids_target'] = seq_char_ids_target
-        if 'seq_moji_target' in batch[0]:
+        if any(s in batch[0] for s in {'moji_probs', 'moji_latent'}):
             out_dict['seq_moji_target'] = seq_moji_target
         
         return out_dict

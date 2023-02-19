@@ -16,7 +16,7 @@ from os.path import abspath, dirname
 FILE_DIR = dirname(abspath(__file__))
 
 class PretrainedModel(nn.Module):
-    def __init__(self, model_path:str, vocab_path:str = None, scratch_config = None, ):
+    def __init__(self, model_path:str, vocab_path:str = None, scratch_config = None, freeze_model: bool = True):
         super().__init__()
         if vocab_path is None:
             vocab_path = os.path.join(FILE_DIR, 'vocab.txt')
@@ -28,9 +28,10 @@ class PretrainedModel(nn.Module):
         else:
             self.model = PnGBert.from_path(model_path)
             print("Loaded pngbert from", model_path)
-        self.freeze_embedding()
-        self.freeze_layers()
-        self.freeze_head()
+        if freeze_model:
+            self.freeze_embedding()
+            self.freeze_layers()
+            self.freeze_head()
         self.model.eval()
         self.out_dim = self.model.config.hidden_size
     

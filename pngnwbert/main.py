@@ -11,7 +11,7 @@ class LMTrainer(pl.LightningModule):
     def __init__(self, learning_rate, adam_beta1, adam_beta2, adam_epsilon):
         super().__init__()
         self.save_hyperparameters()  # note, all __init__ kwargs are loaded by self.save_hyperparameters(), somehow
-        self.model = PnGBert(BertConfig())
+        self.model = PnGBert.from_path("checkpoints/last_modified.ckpt") #PnGBert(BertConfig())
     
     def training_step(self, batch, batch_idx):
         model_out = self.model(**batch)
@@ -55,8 +55,8 @@ def cli_main():
     parser.add_argument('--mlm_prob', type=float, default=0.15)
     parser.add_argument('--g2p_prob', type=float, default=0.15)
     parser.add_argument('--p2g_prob', type=float, default=0.15)
-    parser.add_argument('--train_batch_size', type=int, default=8)
-    parser.add_argument('--dataloader_num_workers', type=int, default=4)
+    parser.add_argument('--train_batch_size', type=int, default=12)
+    parser.add_argument('--dataloader_num_workers', type=int, default=8)
     parser = pl.Trainer.add_argparse_args(parser)
     parser = LMTrainer.add_model_specific_args(parser)
     args = parser.parse_args()
@@ -95,7 +95,7 @@ def cli_main():
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         dirpath='checkpoints',
         filename='lm-{epoch:02d}',
-        every_n_train_steps=100,
+        every_n_train_steps=10000,
         save_last=True,
     )
     

@@ -13,7 +13,7 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, Packed
 
 from pngnwbert.torchmoji.lstm import LSTMHardSigmoid
 from pngnwbert.torchmoji.attlayer import Attention
-from pngnwbert.torchmoji.global_variables import NB_TOKENS, NB_EMOJI_CLASSES
+from pngnwbert.torchmoji.global_variables import NB_EMB_TOKENS, NB_EMOJI_CLASSES
 
 
 def torchmoji_feature_encoding(weight_path, return_attention=False):
@@ -31,9 +31,9 @@ def torchmoji_feature_encoding(weight_path, return_attention=False):
     """
 
     model = TorchMoji(nb_classes=None,
-                     nb_tokens=NB_TOKENS,
-                     feature_output=True,
-                     return_attention=return_attention)
+                      nb_tokens=NB_EMB_TOKENS,
+                      feature_output=True,
+                      return_attention=return_attention)
     load_specific_weights(model, weight_path, exclude_names=['output_layer'])
     return model
 
@@ -53,8 +53,8 @@ def torchmoji_emojis(weight_path, return_attention=False):
     """
 
     model = TorchMoji(nb_classes=NB_EMOJI_CLASSES,
-                     nb_tokens=NB_TOKENS,
-                     return_attention=return_attention)
+                      nb_tokens=NB_EMB_TOKENS,
+                      return_attention=return_attention)
     model.load_state_dict(torch.load(weight_path))
     return model
 
@@ -86,10 +86,10 @@ def torchmoji_transfer(nb_classes, weight_path=None, extend_embedding=0,
     """
 
     model = TorchMoji(nb_classes=nb_classes,
-                     nb_tokens=NB_TOKENS + extend_embedding,
-                     embed_dropout_rate=embed_dropout_rate,
-                     final_dropout_rate=final_dropout_rate,
-                     output_logits=True)
+                      nb_tokens=NB_EMB_TOKENS + extend_embedding,
+                      embed_dropout_rate=embed_dropout_rate,
+                      final_dropout_rate=final_dropout_rate,
+                      output_logits=True)
     if weight_path is not None:
         load_specific_weights(model, weight_path,
                               exclude_names=['output_layer'],
@@ -303,11 +303,11 @@ def load_specific_weights(model, weight_path, exclude_names=[], extend_embedding
         # extend embedding layer to allow new randomly initialized words
         # if requested. Otherwise, just load the weights for the layer.
         if 'embed' in key and extend_embedding > 0:
-            weight = torch.cat((weight, model_w[NB_TOKENS:, :]), dim=0)
+            weight = torch.cat((weight, model_w[NB_EMB_TOKENS:, :]), dim=0)
             if verbose:
                 print('Extended vocabulary for embedding layer ' +
                       'from {} to {} tokens.'.format(
-                        NB_TOKENS, NB_TOKENS + extend_embedding))
+                        NB_EMB_TOKENS, NB_EMB_TOKENS + extend_embedding))
         try:
             model_w.copy_(weight)
         except:

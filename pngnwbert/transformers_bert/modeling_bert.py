@@ -31,6 +31,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from pngnwbert.transformers_bert.pytorch_utils import apply_chunking_to_forward
 from pngnwbert.transformers_bert.generic import ModelOutput
 from pngnwbert.transformers_bert.configuration_bert import BertConfig
+from pngnwbert.torchmoji.global_variables import NB_EMOJI_CLASSES
 
 import logging as logger
 
@@ -871,7 +872,11 @@ class BertPreTrainedModel(nn.Module):
         sd = {k[6:] if 'model.' in k else k: v for k, v in sd.items()}
         
         model = cls(**sd['_extra_state']['kwargs'])
-        model.load_state_dict(sd)
+        missing_keys, unexpected_keys = model.load_state_dict(sd, strict=False)
+        if len(missing_keys) > 0:
+            print(f'Missing keys: {missing_keys}')
+        if len(unexpected_keys) > 0:
+            print(f'Unexpected keys: {unexpected_keys}')
         return model
 
 
@@ -1037,7 +1042,7 @@ class PnGBertHead(nn.Module):
         self.char_decoder.bias.data.zero_()
         
         # Linear output for DeepMoji aux loss
-        self.moji_decoder = nn.Linear(config.hidden_size, config.deepmoji_size)
+        self.moji_decoder = nn.Linear(config.hidden_size, NB_EMOJI_CLASSES)
         self.moji_decoder.bias.data.zero_()
     
     def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1046,8 +1051,8 @@ class PnGBertHead(nn.Module):
         hidden_states = self.LayerNorm(hidden_states)
         pred_word_logits = self.char_decoder(hidden_states)
         pred_char_logits = self.word_decoder(hidden_states)
-        pred_moji_latent = self.moji_decoder(hidden_states)
-        return pred_word_logits, pred_char_logits, pred_moji_latent
+        pred_moji_probs = self.moji_decoder(hidden_states)
+        return pred_word_logits, pred_char_logits, pred_moji_probs
 
 """Bert Model with a `language modeling` head on top."""
 class PnGBert(BertPreTrainedModel):
@@ -1122,7 +1127,7 @@ class PnGBert(BertPreTrainedModel):
         )
         
         sequence_output = outputs[0]
-        pred_word_logits, pred_char_logits, pred_moji_latent = self.cls(sequence_output)
+        pred_word_logits, pred_char_logits, pred_moji_probs = self.cls(sequence_output)
         
         losses = None
         has_gt_word = seq_word_ids_target is not None
@@ -1132,8 +1137,9 @@ class PnGBert(BertPreTrainedModel):
             loss_func = CrossEntropyLoss()  # -100 index = padding token
             masked_word_loss = loss_func(pred_word_logits.view(-1, self.config.vocab_size), seq_word_ids_target.view(-1))
             masked_char_loss = loss_func(pred_char_logits.view(-1, self.config.vocab_size), seq_char_ids_target.view(-1))
-            masked_moji_loss = F.l1_loss(pred_moji_latent, seq_moji_target, reduction='none')\
-                .masked_fill_(~seq_moji_target.ne(0.0), 0).sum() / seq_moji_target.ne(0.0).sum()
+            moji_mask = seq_moji_target.ne(0.0).any(dim=2, keepdim=True) # [B,T,1]
+            masked_moji_loss = F.mse_loss(pred_moji_probs, seq_moji_target, reduction='none')\
+                .masked_fill_(~moji_mask, 0).sum() / (moji_mask.sum()*NB_EMOJI_CLASSES)
             losses = [masked_word_loss, masked_char_loss, masked_moji_loss]
         
         if not return_dict:
@@ -1148,7 +1154,7 @@ class PnGBert(BertPreTrainedModel):
             **out_dict,
             "word_logits": pred_word_logits,
             "char_logits": pred_char_logits,
-            "moji_latent": pred_moji_latent,
+            "moji_probs": pred_moji_probs,
             "hidden_states": outputs.hidden_states,
             "attentions": outputs.attentions,
             "last_hidden_state": outputs.last_hidden_state,
