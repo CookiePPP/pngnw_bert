@@ -12,8 +12,6 @@ Dubbed "Phoneme and Grapheme and Word BERT", this model includes additional word
 
 Also does include additional text-to-emoji objective using DeepMoji teacher model.
 
-Due to 
-
 ---
 
 ![pre_training_architecture.png](pngnwbert/pre_training_architecture.png)
