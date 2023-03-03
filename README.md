@@ -18,6 +18,14 @@ Also does include additional text-to-emoji objective using DeepMoji teacher mode
 
 ---
 
+I no longer recommend using PnG BERT or this modified version because of the high compute costs.
+
+Since each input is chars+phonemes instead of just wordpieces, the input length is around 6x longer than BERT.
+
+With dot-prod attention scaling with the square of the input length, the attention is theoretically 36x more expensive in PnG BERT than normal BERT.
+
+---
+
 ![pre_training_architecture.png](pngnwbert/pre_training_architecture.png)
 
 Here's the modified architecture.
