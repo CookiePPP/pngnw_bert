@@ -1,5 +1,9 @@
 # pngnw_bert
 
+
+
+[PRETRAINED WEIGHTS LINK](https://mega.nz/folder/KQRERZwT#h23pv1xMN2zN_xqLOgytCQ)
+
 ---
 
 ## REPO STATUS: WORKS BUT NOT GOING TO BE MAINTAINED
@@ -64,5 +68,3 @@ I can't recommend using this repo. The idea sounded really cool but after experi
 It's still possible that this method will help a lot with accented speakers or other more challenging cases, but for normal English speakers it's just not worth it.
 
 ---
-
-[PRETRAINED WEIGHTS LINK](https://mega.nz/folder/KQRERZwT#h23pv1xMN2zN_xqLOgytCQ)
