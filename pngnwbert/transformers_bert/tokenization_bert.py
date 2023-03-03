@@ -285,7 +285,7 @@ class WordpieceTokenizer(object):
         # Convert tokens to IDs
         # ["Say", "##ing", "."] -> [688, 1013, 39]
         # ["S", "EY1", "IH0", "NG", "."] -> [105, 101, 102, 103, 39]
-        # [["S","a","y", " ", "i","n","g", "."] -> [1, 9, 4, 10, 41, 13, 34, 39]
+        # [["S","a","y", " ", "i","n","g", "."] -> [105, 9, 4, 10, 41, 13, 34, 39]
         for word in words:
             word['token_ids'] = self.convert_tokens_to_ids(word['tokens'])
             word['phone_ids'] = self.convert_tokens_to_ids(word['phones'])

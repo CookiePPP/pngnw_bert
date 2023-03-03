@@ -1,7 +1,7 @@
 import traceback
 import os
 import random
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 import torch
 from unidecode import unidecode
@@ -46,20 +46,31 @@ class BadQualityDataError(Exception):
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, path: str, vocab: List[str],
-            mlm_prob: float = 0.15,
-            g2p_prob: float = 0.15,
-            p2g_prob: float = 0.15):
+            mlm_prob: float = 0.10, # replace input with mask and predict the original token
+            g2p_prob: float = 0.10, # replace phone with mask and use word_id+text to predict the original phone
+            p2g_prob: float = 0.10, # replace text with mask and use word_id+phone to predict the original text
+            rnd_prob: float = 0.10, # replace input with random token and predict the original token
+            word_id_range: Tuple[int, int] = (0, 33147),
+            letter_id_range: Tuple[int, int] = (106, 195),
+            phone_id_range: Tuple[int, int] = (33148, 33148 + 83),
+            ):
         self.path = path # path to dataset.txt file (a tsv with id,text,phoneme)
         self.n_lines = len(open(self.path, 'r').readlines())
+        self.n_vocab = len(vocab)
         self.tokenizer = WordpieceTokenizer(vocab=vocab, unk_token='MASKTOKEN')
         torchmoji = torchmoji_emojis(PRETRAINED_PATH)
         self.torchmoji_final_dropout = torchmoji.final_dropout
         self.torchmoji_output_layer = torchmoji.output_layer
         
+        self.word_id_range = word_id_range
+        self.letter_id_range = letter_id_range
+        self.phone_id_range = phone_id_range
+        
         self.mlm_prob = mlm_prob # chance the model has to infer a word from context only
         self.g2p_prob = g2p_prob # chance the model has to infer a phoneme from it's grapheme counterpart
         self.p2g_prob = p2g_prob # chance the model has to infer a grapheme from it's phoneme counterpart
-        assert self.mlm_prob + self.g2p_prob + self.p2g_prob <= 1.0, 'mlm_prob + g2p_prob + p2g_prob must be <= 1.0'
+        self.rnd_prob = rnd_prob # chance the model has to infer a correct word from a random word
+        assert self.mlm_prob + self.g2p_prob + self.p2g_prob + self.rnd_prob <= 1.0, 'mlm_prob + g2p_prob + p2g_prob must be <= 1.0'
     
     def __len__(self):
         return self.n_lines
@@ -97,6 +108,7 @@ class Dataset(torch.utils.data.Dataset):
                 ('mlm', self.mlm_prob),
                 ('g2p', self.g2p_prob),
                 ('p2g', self.p2g_prob),
+                ('rnd', self.rnd_prob),
                 ('copy', none_p/2),
                 ('none', none_p/2),
             ])
@@ -107,6 +119,15 @@ class Dataset(torch.utils.data.Dataset):
 
         seq_word_ids_target = []  # target for model to predict
         seq_char_ids_target = []  # target for model to predict
+        
+        def get_rand_word_id():
+            return random.randint(*self.word_id_range)
+        
+        def get_rand_letter_id():
+            return random.randint(*self.letter_id_range)
+        
+        def get_rand_phone_id():
+            return random.randint(*self.phone_id_range)
         
         # apply the tasks to the words.
         # (note that each word appears in both the grapheme and phoneme sequences, so both must be masked together for MLM task)
@@ -144,6 +165,17 @@ class Dataset(torch.utils.data.Dataset):
                 seq_word_ids_input.append(seq_word_ids[i])
                 seq_char_ids_input.append(MASK_ID)
                 seq_word_ids_target.append(NO_TARGET_ID)
+                seq_char_ids_target.append(seq_char_ids[i])
+            elif task == 'rnd':
+                # replace word and letters with random word and letters
+                seq_word_ids_input.append(get_rand_word_id())
+                if is_letter:
+                    seq_char_ids_input.append(get_rand_letter_id())
+                elif is_phone:
+                    seq_char_ids_input.append(get_rand_phone_id())
+                else:
+                    raise Exception(f'Invalid segment id {seq_segment_ids[i]}')
+                seq_word_ids_target.append(seq_word_ids[i])
                 seq_char_ids_target.append(seq_char_ids[i])
             elif task == 'copy':
                 # no masking, no target

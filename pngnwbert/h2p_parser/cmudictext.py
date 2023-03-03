@@ -28,11 +28,14 @@ except LookupError:
     nltk.download('wordnet')
     nltk.download('omw-1.4')
 
+from g2p_en import G2p
+g2p = G2p()
+
 
 class CMUDictExt:
     def __init__(self, ph_format: str = 'sds_b', cmu_dict_path: str = None, h2p_dict_path: str = None,
                  cmu_multi_mode: int = 0, process_numbers: bool = True, phoneme_brackets: bool = True,
-                 unresolved_mode: str = 'keep'):
+                 unresolved_mode: str = 'g2p_en'):
         # noinspection GrazieInspection
         """
         Initialize CMUDictExt - Extended Grapheme to Phoneme conversion using CMU Dictionary with Heteronym parsing.
@@ -49,6 +52,7 @@ class CMUDictExt:
             - keep : Keep the text-form word in the output.
             - remove : Remove the text-form word from the output.
             - drop : Return the line as None if any word is unresolved.
+            - g2p_en: Use g2p_en Deep Learning model to guess the pronunciation.
 
         :param cmu_dict_path: Path to CMU dictionary file (.txt)
         :type: str
@@ -59,7 +63,7 @@ class CMUDictExt:
         """
 
         # Check valid unresolved_mode argument
-        if unresolved_mode not in ['keep', 'remove', 'drop']:
+        if unresolved_mode not in ['keep', 'remove', 'drop', 'g2p_en']:
             raise ValueError('Invalid value for unresolved_mode: {}'.format(unresolved_mode))
         self.unresolved_mode = unresolved_mode
 
@@ -266,7 +270,7 @@ class CMUDictExt:
         """
 
         # Check valid unresolved_mode argument
-        if self.unresolved_mode not in ['keep', 'remove', 'drop']:
+        if self.unresolved_mode not in ['keep', 'remove', 'drop', 'g2p_en']:
             raise ValueError('Invalid value for unresolved_mode: {}'.format(self.unresolved_mode))
         ur_mode = self.unresolved_mode
         
@@ -288,6 +292,9 @@ class CMUDictExt:
                         return None
                     if ur_mode == 'remove':
                         text = replace_first(word, '', text)
+                    if ur_mode == 'g2p_en':
+                        ph_word = ph.with_cb(' '.join(g2p(word))) # 'foreleg' -> '{F AO R L EH G}'
+                        text = replace_first(word, ph_word, text)
                     continue
                 # Do replace
                 f_ph = ph.with_cb(ph.to_sds(entry))

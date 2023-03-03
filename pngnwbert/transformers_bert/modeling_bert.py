@@ -159,16 +159,42 @@ class BaseModelOutputWithPoolingAndCrossAttentions(ModelOutput):
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
 
+class SinePositionEmbedding(nn.Module): # taken from https://github.com/NVIDIA/DeepLearningExamples/blob/master/PyTorch/SpeechSynthesis/FastPitch/fastpitch/transformer.py#L22
+    def __init__(self, in_dim:int):
+        super().__init__()
+        self.in_dim = in_dim
+        inv_freq = 1 / (10000 ** (torch.arange(0.0, in_dim, 2.0) / in_dim))
+        self.register_buffer('inv_freq', inv_freq)
+
+    def forward(self, inp:Tensor):
+        B, T = inp.shape[:2]
+        pos_seq = torch.arange(T, device=inp.device).to(inp.dtype)
+        sinusoid_inp = pos_seq.unsqueeze(-1) @ self.inv_freq.unsqueeze(0) # [T, 1] @ [1, demb] -> [T, demb]
+        pos_emb = torch.cat([sinusoid_inp.sin(), sinusoid_inp.cos()], dim=1)
+        return pos_emb[None, :, :].expand(B, -1, -1)
+
+def batched_index_select_slow(input_tensor, index_tensor): # [B, T1, ...], [B, T2] -> [B, T2, ...]
+    return torch.stack([input_tensor[i, index_tensor[i].view(-1)] for i in range(input_tensor.shape[0])])
+    # TODO: Find a way to do this without a for loop
+
 
 class PnGBertEmbeddings(nn.Module):
     """Construct the embeddings from word, grapheme, phoneme, word-position, g/p-position and segment embeddings."""
 
     def __init__(self, config):
         super().__init__()
+        assert config.position_embedding_type in ["absolute", "sine_conv"], f"Unknown position embedding type {config.position_embedding_type}"
+        self.position_embedding_type = config.position_embedding_type
+        
         # word embeddings
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
-        self.rel_word_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        self.abs_word_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        if config.position_embedding_type == "absolute":
+            self.rel_word_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+            self.abs_word_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        elif config.position_embedding_type == "sine_conv":
+            self.sin_pos_emb = SinePositionEmbedding(config.hidden_size)
+            self.rel_word_pos_encoder = nn.Linear(config.hidden_size, config.hidden_size)
+            self.abs_word_pos_encoder = nn.Linear(config.hidden_size, config.hidden_size)
         
         # word type embeddings (capitalization)
         self.word_type_embeddings = nn.Embedding(6, config.hidden_size, padding_idx=config.pad_token_id)
@@ -177,16 +203,19 @@ class PnGBertEmbeddings(nn.Module):
         
         # grapheme and phoneme embeddings
         self.char_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
-        self.rel_char_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        self.abs_char_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        
-        # position of grapheme or phoneme within each word
-        self.subword_pos_embeddings = nn.Embedding(64, config.hidden_size)
+        if config.position_embedding_type == "absolute":
+            self.rel_char_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+            self.abs_char_pos_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        elif config.position_embedding_type == "sine_conv":
+            self.rel_char_pos_encoder = nn.Linear(config.hidden_size, config.hidden_size)
+            self.abs_char_pos_encoder = nn.Linear(config.hidden_size, config.hidden_size)
         
         # segment embeddings (aka, is this the grapheme or phoneme sequence)
         self.segment_embeddings = nn.Embedding(2, config.hidden_size)
-        
-        # NOTE - remember to initialize the embeddings with corrected scale
+        if config.position_embedding_type == "absolute":
+            self.subword_pos_embeddings = nn.Embedding(64, config.hidden_size)
+        elif config.position_embedding_type == "sine_conv":
+            self.subword_pos_encoder = nn.Linear(config.hidden_size, config.hidden_size)
         
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
         # any TensorFlow checkpoint file
@@ -206,17 +235,23 @@ class PnGBertEmbeddings(nn.Module):
         segment_ids: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
         word_embeddings = self.word_embeddings(input_word_ids)
-        rel_word_pos_embeddings = self.rel_word_pos_embeddings(rel_word_pos_ids)
-        abs_word_pos_embeddings = self.abs_word_pos_embeddings(abs_word_pos_ids)
         word_type_embeddings = self.word_type_embeddings(word_type_ids)
-        
         char_embeddings = self.char_embeddings(input_char_ids)
-        rel_char_pos_embeddings = self.rel_char_pos_embeddings(rel_char_pos_ids)
-        abs_char_pos_embeddings = self.abs_char_pos_embeddings(abs_char_pos_ids)
-        
-        subword_pos_embeddings = self.subword_pos_embeddings(subword_pos_ids)
-        
         segment_embeddings = self.segment_embeddings(segment_ids)
+        
+        if self.position_embedding_type == "absolute":
+            rel_word_pos_embeddings = self.rel_word_pos_embeddings(rel_word_pos_ids)
+            abs_word_pos_embeddings = self.abs_word_pos_embeddings(abs_word_pos_ids)
+            rel_char_pos_embeddings = self.rel_char_pos_embeddings(rel_char_pos_ids)
+            abs_char_pos_embeddings = self.abs_char_pos_embeddings(abs_char_pos_ids)
+            subword_pos_embeddings  = self.subword_pos_embeddings ( subword_pos_ids)
+        elif self.position_embedding_type == "sine_conv":
+            pos_embed = self.sin_pos_emb(char_embeddings)
+            rel_word_pos_embeddings = self.rel_word_pos_encoder(batched_index_select_slow(pos_embed, rel_word_pos_ids))
+            abs_word_pos_embeddings = self.abs_word_pos_encoder(batched_index_select_slow(pos_embed, abs_word_pos_ids))
+            rel_char_pos_embeddings = self.rel_char_pos_encoder(batched_index_select_slow(pos_embed, rel_char_pos_ids))
+            abs_char_pos_embeddings = self.abs_char_pos_encoder(batched_index_select_slow(pos_embed, abs_char_pos_ids))
+            subword_pos_embeddings  = self.subword_pos_encoder (batched_index_select_slow(pos_embed,  subword_pos_ids))
         
         embeddings = word_embeddings + rel_word_pos_embeddings + abs_word_pos_embeddings + word_type_embeddings \
                      + char_embeddings + rel_char_pos_embeddings + abs_char_pos_embeddings + subword_pos_embeddings \
@@ -227,8 +262,10 @@ class PnGBertEmbeddings(nn.Module):
 
 
 class BertSelfAttention(nn.Module):
-    def __init__(self, config, position_embedding_type=None):
+    def __init__(self, config, position_embedding_type=None, flash_attn:bool=True):
         super().__init__()
+        self.flash_attn = flash_attn
+        
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
                 f"The hidden size ({config.hidden_size}) is not a multiple of the number of attention "
@@ -240,7 +277,7 @@ class BertSelfAttention(nn.Module):
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
         self.query = nn.Linear(config.hidden_size, self.all_head_size)
-        self.key = nn.Linear(config.hidden_size, self.all_head_size)
+        self.key   = nn.Linear(config.hidden_size, self.all_head_size)
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
@@ -253,11 +290,73 @@ class BertSelfAttention(nn.Module):
 
         self.is_decoder = config.is_decoder
 
-    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
-        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        x = x.view(new_x_shape)
-        return x.permute(0, 2, 1, 3)
+        self.flash = None
+        if self.flash_attn:
+            # Setup [flash attention](https://github.com/HazyResearch/flash-attention).
+            # Flash attention is only used if it's installed
+            # and `CrossAttention.use_flash_attention` is set to `True`.
+            try:
+                # You can install flash attention by cloning their Github repo,
+                # [https://github.com/HazyResearch/flash-attention](https://github.com/HazyResearch/flash-attention)
+                # and then running `python setup.py install`
+                from flash_attn.flash_attention import FlashAttention
+                self.flash = FlashAttention(
+                    softmax_scale=1 / math.sqrt(self.attention_head_size),
+                    attention_dropout=config.attention_probs_dropout_prob,
+                )
+            # Set to `None` if it's not installed
+            except ImportError:
+                self.flash = None
+        self.force_flash_path = False
 
+    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size) # (batch_size, seq_len, num_heads, head_size)
+        x = x.view(new_x_shape)
+        return x.permute(0, 2, 1, 3) # (batch_size, num_heads, seq_len, head_size)
+
+    def flash_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+        """
+        #### Flash Attention
+        :param q: are the query vectors before splitting heads, of shape `[batch_size, seq, d_attn]`
+        :param k: are the query vectors before splitting heads, of shape `[batch_size, seq, d_attn]`
+        :param v: are the query vectors before splitting heads, of shape `[batch_size, seq, d_attn]`
+        """
+    
+        # Get batch size and number of elements along sequence axis (`width * height`)
+        batch_size, seq_len, _ = q.shape
+    
+        # Stack `q`, `k`, `v` vectors for flash attention, to get a single tensor of
+        # shape `[batch_size, seq_len, 3, heads * dim_head]`
+        qkv = torch.stack((q, k, v), dim=2)
+        # Split the heads
+        qkv = qkv.view(batch_size, seq_len, 3, self.num_attention_heads, self.attention_head_size)
+    
+        # Flash attention works for head sizes `32`, `64` and `128`, so we may have to pad the heads to
+        # fit this size.
+        if self.attention_head_size <= 32:
+            pad = 32 - self.attention_head_size
+        elif self.attention_head_size <= 64:
+            pad = 64 - self.attention_head_size
+        elif self.attention_head_size <= 128:
+            pad = 128 - self.attention_head_size
+        else:
+            raise ValueError(f'Head size ${self.attention_head_size} too large for Flash Attention')
+    
+        # Pad the heads
+        if pad:
+            qkv = torch.cat((qkv, qkv.new_zeros(batch_size, seq_len, 3, self.num_attention_heads, pad)), dim=-1)
+    
+        # Compute attention
+        # $$\underset{seq}{softmax}\Bigg(\frac{Q K^\top}{\sqrt{d_{key}}}\Bigg)V$$
+        # This gives a tensor of shape `[batch_size, seq_len, heads, d_padded]`
+        assert self.flash is not None, 'Flash Attention was called, but is not installed'
+        out = self.flash(qkv.half())[0].to(q.dtype)
+        # Truncate the extra head size
+        out = out[:, :, :, :self.attention_head_size]
+        # Reshape to `[batch_size, seq_len, heads * dim_head]`
+        out = out.reshape(batch_size, seq_len, self.num_attention_heads * self.attention_head_size)
+        return out
+    
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -268,6 +367,13 @@ class BertSelfAttention(nn.Module):
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
     ) -> Tuple[torch.Tensor]:
+        if self.force_flash_path or ((self.flash is not None) and (self.attention_head_size <= 64) and (encoder_hidden_states is None) and (past_key_value is None) and (self.position_embedding_type == "absolute") and (hidden_states.device != torch.device("cpu"))):
+            query_layer = self.query(hidden_states) # -> (batch_size, seq_len, all_head_size)
+            key_layer   = self.key  (hidden_states) # -> (batch_size, seq_len, all_head_size)
+            value_layer = self.value(hidden_states) # -> (batch_size, seq_len, all_head_size)
+            context_layer = self.flash_attention(query_layer, key_layer, value_layer)
+            return (context_layer,)
+        
         mixed_query_layer = self.query(hidden_states)
 
         # If this is instantiated as a cross-attention module, the keys
@@ -290,10 +396,10 @@ class BertSelfAttention(nn.Module):
             key_layer = torch.cat([past_key_value[0], key_layer], dim=2)
             value_layer = torch.cat([past_key_value[1], value_layer], dim=2)
         else:
-            key_layer = self.transpose_for_scores(self.key(hidden_states))
-            value_layer = self.transpose_for_scores(self.value(hidden_states))
+            key_layer = self.transpose_for_scores(self.key(hidden_states)) # (batch_size, num_heads, seq_len, head_size)
+            value_layer = self.transpose_for_scores(self.value(hidden_states)) # (batch_size, num_heads, seq_len, head_size)
 
-        query_layer = self.transpose_for_scores(mixed_query_layer)
+        query_layer = self.transpose_for_scores(mixed_query_layer) # (batch_size, num_heads, seq_len, head_size)
 
         use_cache = past_key_value is not None
         if self.is_decoder:
@@ -308,6 +414,7 @@ class BertSelfAttention(nn.Module):
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        # (batch_size, num_heads, seq_len, head_size) @ (batch_size, num_heads, head_size, seq_len) -> (batch_size, num_heads, seq_len, seq_len)
 
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             query_length, key_length = query_layer.shape[2], key_layer.shape[2]
@@ -348,10 +455,11 @@ class BertSelfAttention(nn.Module):
             attention_probs = attention_probs * head_mask
 
         context_layer = torch.matmul(attention_probs, value_layer)
-
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(new_context_layer_shape)
+        # (batch_size, num_heads, seq_len, seq_len) @ (batch_size, num_heads, seq_len, head_size) -> (batch_size, num_heads, seq_len, head_size)
+        
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous() # (batch_size, seq_len, num_heads, head_size)
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,) # (batch_size, seq_len, all_head_size)
+        context_layer = context_layer.view(new_context_layer_shape) # (batch_size, seq_len, all_head_size)
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
@@ -375,9 +483,9 @@ class BertSelfOutput(nn.Module):
 
 
 class BertAttention(nn.Module):
-    def __init__(self, config, position_embedding_type=None):
+    def __init__(self, config, position_embedding_type=None, flash_attn:bool=True):
         super().__init__()
-        self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type)
+        self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type, flash_attn=flash_attn)
         self.output = BertSelfOutput(config)
     
     def forward(
@@ -524,7 +632,7 @@ class BertEncoder(nn.Module):
         super().__init__()
         self.config = config
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
-        self.gradient_checkpointing = False
+        self.gradient_checkpointing = True
 
     def forward(
         self,
@@ -863,15 +971,18 @@ class BertPreTrainedModel(nn.Module):
         return head_mask
     
     @classmethod
-    def from_path(cls, path:str):
-        sd = torch.load(path)
+    def from_path(cls, path:str, custom_init_kwargs:dict = None):
+        sd = torch.load(path, map_location='cpu')
         
         # remove PtL formatting
         if 'state_dict' in sd:
             sd = sd['state_dict']
         sd = {k[6:] if 'model.' in k else k: v for k, v in sd.items()}
         
-        model = cls(**sd['_extra_state']['kwargs'])
+        if custom_init_kwargs is None:
+            model = cls(**sd['_extra_state']['kwargs'])
+        else:
+            model = cls(**custom_init_kwargs)
         missing_keys, unexpected_keys = model.load_state_dict(sd, strict=False)
         if len(missing_keys) > 0:
             print(f'Missing keys: {missing_keys}')

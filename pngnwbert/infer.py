@@ -23,10 +23,10 @@ class PretrainedModel(nn.Module):
         vocab = [v.strip() for v in open(vocab_path, 'r', encoding='utf-8').read().splitlines() if v.strip()]
         self.tokenizer = WordpieceTokenizer(vocab=vocab, unk_token='MASKTOKEN')
         self.collate = Collate(pad_token_id=0)
-        if (model_path is None or not os.path.exists(model_path)) and scratch_config is not None:
+        if (model_path is None or not os.path.exists(model_path)):
             self.model = PnGBert(scratch_config)
         else:
-            self.model = PnGBert.from_path(model_path)
+            self.model = PnGBert.from_path(model_path, custom_init_kwargs={'config': scratch_config})
             print("Loaded pngbert from", model_path)
         if freeze_model:
             self.freeze_embedding()
